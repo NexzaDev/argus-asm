@@ -1,0 +1,352 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Go from go.mod)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet (nogui, CLI only)
+        run: go vet -tags nogui ./...
+
+      - name: Vet (ci tag, headless GUI driver)
+        run: go vet -tags ci ./...
+
+      - name: Test CLI with race detector (nogui)
+        run: go test -race -count=1 -tags nogui ./...
+
+      - name: Test CLI and headless GUI with race detector (ci tag)
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -count=1 -tags ci ./... 2>&1 | tee "$RUNNER_TEMP/test-ci.txt"
+
+      - name: Annotate failing tests (ci tag)
+        if: failure()
+        shell: bash
+        run: |
+          grep -E -- '--- FAIL|DATA RACE|^panic|_test\.go:[0-9]+|^FAIL' "$RUNNER_TEMP/test-ci.txt" | head -n 80 | while IFS= read -r line; do echo "::error title=test-ci::${line}"; done
+
+  nogui-build:
+    name: nogui build and CLI smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Build without GUI
+        shell: bash
+        run: go build -trimpath -tags nogui -o bin/argus-asm ./cmd/argus-asm
+
+      - name: Smoke test the built binary
+        shell: bash
+        env:
+          ARGUS_ASM_DB: ${{ runner.temp }}/argus-smoke.db
+        run: |
+          BIN=./bin/argus-asm
+          if [ -f ./bin/argus-asm.exe ]; then BIN=./bin/argus-asm.exe; fi
+          "$BIN" version
+          "$BIN" init
+          "$BIN" scope add example.test
+          "$BIN" scope add 192.0.2.0/24
+          "$BIN" asset add www.example.test
+          "$BIN" asset add api.example.test
+          "$BIN" asset add 192.0.2.10
+          "$BIN" service import-nmap testdata/demo/nmap.xml --dry-run
+          "$BIN" service import-nmap testdata/demo/nmap.xml
+          "$BIN" cert import www.example.test testdata/demo/certificate.pem
+          "$BIN" findings import --source demo-scanner testdata/demo/findings.csv --dry-run
+          "$BIN" findings import --source demo-scanner testdata/demo/findings.csv
+          "$BIN" findings import --format json --source demo-json-feed testdata/demo/findings.json
+          "$BIN" findings list --limit 1 --json
+          "$BIN" findings import --format sarif --source demo-sarif-analyzer testdata/demo/findings.sarif --dry-run
+          "$BIN" findings import --format sarif --source demo-sarif-analyzer testdata/demo/findings.sarif
+          "$BIN" notify refresh
+          OUTBOX="$RUNNER_TEMP/argus-smoke-outbox.jsonl"
+          "$BIN" notify deliver --to "$OUTBOX" --dry-run
+          "$BIN" notify deliver --to "$OUTBOX"
+          "$BIN" notify deliver --to "$OUTBOX" | grep -q "delivered 0 notification"
+          SEALED="$RUNNER_TEMP/argus-smoke.sealed"
+          RESTORED="$RUNNER_TEMP/argus-smoke-restored.db"
+          printf 'smoke-passphrase-%s-%s\n' "$RANDOM" "$RANDOM" > "$RUNNER_TEMP/argus-smoke-pass.txt"
+          "$BIN" db seal --out "$SEALED" --passphrase-stdin < "$RUNNER_TEMP/argus-smoke-pass.txt"
+          "$BIN" db unseal --in "$SEALED" --out "$RESTORED" --passphrase-stdin < "$RUNNER_TEMP/argus-smoke-pass.txt"
+          ARGUS_ASM_DB="$RESTORED" "$BIN" audit verify
+          "$BIN" audit verify
+          echo exit | "$BIN" --ui gui 2> "$RUNNER_TEMP/nogui-stderr.txt"
+          grep -q "nogui" "$RUNNER_TEMP/nogui-stderr.txt"
+
+  gui-build:
+    name: GUI build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Install Linux graphics headers (Fyne getting started, Debian and Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+
+      - name: Build with GUI
+        shell: bash
+        run: go build -trimpath -o bin/argus-asm ./cmd/argus-asm
+
+      - name: Run version
+        shell: bash
+        run: |
+          BIN=./bin/argus-asm
+          if [ -f ./bin/argus-asm.exe ]; then BIN=./bin/argus-asm.exe; fi
+          "$BIN" version
+
+      - name: Headless fallback to the console (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ARGUS_ASM_DB: ${{ runner.temp }}/argus-headless.db
+        run: |
+          set -euo pipefail
+          echo exit | env -u DISPLAY -u WAYLAND_DISPLAY ./bin/argus-asm --ui gui 2> "$RUNNER_TEMP/headless-stderr.txt"
+          grep -q "no graphical display" "$RUNNER_TEMP/headless-stderr.txt"
+          cat "$RUNNER_TEMP/headless-stderr.txt"
+
+  design-screenshots:
+    name: design screenshots (headless software renderer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Render main screens with demo data
+        env:
+          ARGUS_SCREENSHOT_DIR: ${{ runner.temp }}/screenshots
+        run: go test -count=1 -tags ci -run TestWriteDesignScreenshots -v ./internal/gui/
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-screenshots
+          path: ${{ runner.temp }}/screenshots/*.png
+          if-no-files-found: error
+          retention-days: 14
+
+  static-analysis:
+    name: staticcheck (Go from go.mod)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Install Linux graphics headers
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+
+      - name: staticcheck 2026.2.2
+        shell: bash
+        run: |
+          set -o pipefail
+          go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./... > "$RUNNER_TEMP/staticcheck.out" 2>&1
+
+      - name: Report staticcheck output as annotations
+        if: always()
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/staticcheck.out"
+          if [ ! -f "$out" ]; then
+            echo "::error title=staticcheck::no output file was written"
+            exit 1
+          fi
+          echo "::notice title=staticcheck::$(wc -l < "$out") output lines"
+          head -n 300 "$out" | while IFS= read -r line; do echo "::error title=staticcheck::${line}"; done
+          if [ -s "$out" ]; then
+            exit 1
+          fi
+
+  vulnerability-scan:
+    name: govulncheck v1.9.0 (Go 1.27.3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Install Linux graphics headers
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+
+      - name: govulncheck v1.9.0
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  release-artifacts:
+    name: release artifact (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Install Linux graphics headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+
+      - name: Build and package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          VERSION="0.1.0-dev+${SHORT_SHA:0:7}"
+          GOOS="$(go env GOOS)"
+          GOARCH="$(go env GOARCH)"
+          NAME="argus-asm-${VERSION}-${GOOS}-${GOARCH}"
+          mkdir -p "dist/${NAME}"
+          go build -trimpath -ldflags "-X github.com/NexzaDev/argus-asm/internal/buildinfo.Version=${VERSION}" -o "dist/${NAME}/argus-asm" ./cmd/argus-asm
+          "dist/${NAME}/argus-asm" version
+          cp LICENSE README.md THIRD_PARTY_NOTICES.md "dist/${NAME}/"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          rm -rf "dist/${NAME}"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"; else shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"; fi
+          cat "${NAME}.tar.gz.sha256"
+
+      - name: Build and package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "0.1.0-dev+$($env:SHORT_SHA.Substring(0, 7))"
+          $goos = (go env GOOS).Trim()
+          $goarch = (go env GOARCH).Trim()
+          $name = "argus-asm-$version-$goos-$goarch"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          go build -trimpath -ldflags "-X github.com/NexzaDev/argus-asm/internal/buildinfo.Version=$version" -o "dist/$name/argus-asm.exe" ./cmd/argus-asm
+          if ($LASTEXITCODE -ne 0) { throw "go build failed" }
+          & "dist/$name/argus-asm.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "packaged binary failed to run" }
+          Copy-Item LICENSE, README.md, THIRD_PARTY_NOTICES.md -Destination "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 -Path "dist/$name.zip").Hash.ToLower()
+          "$hash  $name.zip" | Set-Content -Path "dist/$name.zip.sha256" -Encoding ascii
+          Get-Content "dist/$name.zip.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: argus-asm-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

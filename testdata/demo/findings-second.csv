@@ -1,0 +1,7 @@
+asset,title,severity,source
+www.example.test,TLS certificate expires within 30 days,medium,demo-scanner
+www.example.test,Missing Strict-Transport-Security header,low,demo-scanner
+www.example.test,Newly observed debug endpoint,medium,demo-scanner
+api.example.test,Admin endpoint reachable without authentication,critical,demo-scanner
+192.0.2.10,SSH service accepts password authentication,high,demo-scanner
+192.0.2.10,Banner discloses server software version,low,demo-scanner

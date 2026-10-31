@@ -1,0 +1,4 @@
+[
+  {"asset": "www.example.test", "title": "Weak cipher suites enabled", "severity": "medium", "source": "demo-json-feed"},
+  {"asset": "api.example.test", "title": "Verbose error pages", "severity": "low", "source": "demo-json-feed"}
+]

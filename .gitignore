@@ -1,0 +1,12 @@
+bin/
+build/
+dist/
+coverage.out
+*.test
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.env
+*.sealed
+.argus-asm-snapshot-*.tmp

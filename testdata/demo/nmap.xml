@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic demo output: RFC 5737 and RFC 2606 names only. -->
+<nmaprun scanner="nmap" args="nmap -oX demo.xml 192.0.2.10" version="7.94">
+  <host>
+    <status state="up" reason="syn-ack"/>
+    <address addr="192.0.2.10" addrtype="ipv4"/>
+    <hostnames/>
+    <ports>
+      <port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/><service name="ssh" product="OpenSSH"/></port>
+      <port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/><service name="https"/></port>
+      <port protocol="tcp" portid="23"><state state="closed" reason="reset"/><service name="telnet"/></port>
+    </ports>
+  </host>
+  <host>
+    <status state="down" reason="no-response"/>
+    <address addr="192.0.2.11" addrtype="ipv4"/>
+  </host>
+</nmaprun>

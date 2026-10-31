@@ -1,0 +1,57 @@
+name: Beta release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: macos-latest
+            name: macos-arm64
+          - os: windows-latest
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: go build -trimpath -ldflags "-H=windowsgui" -o out/ ./cmd/argus-asm
+      - if: runner.os != 'Windows'
+        shell: bash
+        run: go build -trimpath -o out/ ./cmd/argus-asm
+      - if: runner.os != 'Windows'
+        shell: bash
+        run: tar -C out -czf argus-asm-${{ matrix.name }}.tar.gz argus-asm
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Copy-Item out/argus-asm.exe argus-asm-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.name }}
+          path: argus-asm-${{ matrix.name }}.*
+          if-no-files-found: error
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: pkg-*
+          merge-multiple: true
+      - run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --prerelease --title "Argus ASM $GITHUB_REF_NAME (dev beta)" --notes "Early development build (0.1.0-dev). Not every planned feature exists yet. Binaries are unsigned: on macOS right-click and choose Open the first time, on Windows choose More info and Run anyway, on Linux run chmod +x argus-asm after extracting."

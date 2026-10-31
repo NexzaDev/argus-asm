@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Argus ASM
+GenericName=Attack surface inventory
+Comment=Local, defensive attack surface inventory and findings tracker
+Exec=argus-asm --ui gui
+Icon=argus-asm
+Terminal=false
+Categories=Utility;Security;
+Keywords=security;inventory;findings;
+StartupNotify=true

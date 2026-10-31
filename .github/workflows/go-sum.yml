@@ -1,0 +1,61 @@
+name: go.sum refresh
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tidy:
+    name: pin golang.org/x/image, tidy, and commit go.mod/go.sum when they changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      X_IMAGE_VERSION: v0.47.0
+    steps:
+      - name: Check out the selected branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Pin golang.org/x/image (security fix for CVE-2026-46599, fixed in 0.41.0)
+        run: |
+          set -euo pipefail
+          go get "golang.org/x/image@${X_IMAGE_VERSION}"
+
+      - name: Tidy the module graph
+        run: |
+          set -euo pipefail
+          go mod tidy
+          go mod verify
+
+      - name: Show module graph changes
+        run: |
+          set -euo pipefail
+          git diff --stat -- go.mod go.sum || true
+          git diff -- go.mod || true
+
+      - name: Commit go.mod and go.sum only when something changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add go.mod go.sum
+          if git diff --cached --quiet; then
+            echo "go.mod and go.sum are already tidy and pinned; nothing to commit"
+            exit 0
+          fi
+          git commit -m "Pin golang.org/x/image ${X_IMAGE_VERSION} and tidy go.sum"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

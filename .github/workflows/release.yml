@@ -1,0 +1,222 @@
+name: Release (draft)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the leading v, for example 0.1.0. Creates the draft release v<version>."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-draft
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: validate version and check for an existing release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate the version
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=version::expected MAJOR.MINOR.PATCH, for example 0.1.0, got '$VERSION'"
+            exit 1
+          fi
+
+      - name: Refuse to overwrite an existing release or tag
+        run: |
+          set -euo pipefail
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error title=release::a release v$VERSION already exists; choose another version"
+            exit 1
+          fi
+          echo "no release v$VERSION yet"
+
+  build:
+    name: GUI package (${{ matrix.os }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            fyne_os: linux
+          - os: macos-latest
+            fyne_os: darwin
+          - os: windows-latest
+            fyne_os: windows
+    env:
+      VERSION: ${{ inputs.version }}
+      APP_ID: com.nexzadev.argus-asm
+      FYNE_TOOLS: fyne.io/tools/cmd/fyne@v1.7.4
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Record Go toolchain
+        run: go version
+
+      - name: Install Linux graphics headers (Fyne getting started, Debian and Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+
+      - name: Test with the headless GUI driver
+        run: go test -count=1 -tags ci ./...
+
+      - name: Package the GUI with the fyne tool (pinned fyne.io/tools v1.7.4)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH="$(go env GOARCH)"
+          OUT="$RUNNER_TEMP/fyne-out"
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          cd "$OUT"
+          go run "$FYNE_TOOLS" package \
+            -os "${{ matrix.fyne_os }}" \
+            -name "Argus ASM" \
+            -app-id "$APP_ID" \
+            -app-version "$VERSION" \
+            -icon "$GITHUB_WORKSPACE/assets/icon/png/argus-asm-512.png" \
+            -src "$GITHUB_WORKSPACE/cmd/argus-asm" \
+            -release
+          echo "fyne output:"
+          ls -la "$OUT"
+          echo "ARCH=$ARCH" >> "$GITHUB_ENV"
+
+      - name: Collect third-party license files for this platform's GUI build
+        shell: bash
+        run: bash scripts/collect-licenses.sh "$RUNNER_TEMP/licenses" ./cmd/argus-asm
+
+      - name: Assemble release files (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SRC="$(find "$RUNNER_TEMP/fyne-out" -maxdepth 1 -name '*.tar.xz' | head -n 1)"
+          test -n "$SRC"
+          DEST="dist/argus-asm-${VERSION}-linux-${ARCH}.tar.xz"
+          xz -dc "$SRC" > "$RUNNER_TEMP/argus-asm.tar"
+          tar -rf "$RUNNER_TEMP/argus-asm.tar" -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_NOTICES.md README.md
+          tar -rf "$RUNNER_TEMP/argus-asm.tar" -C "$RUNNER_TEMP" licenses
+          xz -c "$RUNNER_TEMP/argus-asm.tar" > "$DEST"
+          tar -tJf "$DEST" > "$RUNNER_TEMP/argus-asm-list.txt"
+          head -n 50 "$RUNNER_TEMP/argus-asm-list.txt"
+
+      - name: Assemble release files (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist "$RUNNER_TEMP/macos-stage"
+          APP="$(find "$RUNNER_TEMP/fyne-out" -maxdepth 1 -name '*.app' | head -n 1)"
+          test -n "$APP"
+          cp -R "$APP" "$RUNNER_TEMP/macos-stage/"
+          cp "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/THIRD_PARTY_NOTICES.md" "$GITHUB_WORKSPACE/README.md" "$RUNNER_TEMP/macos-stage/"
+          cp -R "$RUNNER_TEMP/licenses" "$RUNNER_TEMP/macos-stage/"
+          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/macos-stage" "dist/argus-asm-${VERSION}-darwin-${ARCH}.zip"
+          unzip -l "dist/argus-asm-${VERSION}-darwin-${ARCH}.zip" | tail -n 5
+
+      - name: Assemble release files (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = (go env GOARCH).Trim()
+          $stage = Join-Path $env:RUNNER_TEMP 'windows-stage'
+          New-Item -ItemType Directory -Force -Path $stage, 'dist' | Out-Null
+          $out = Join-Path $env:RUNNER_TEMP 'fyne-out'
+          $built = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'cmd/argus-asm') -Filter '*.exe' -File
+          foreach ($file in $built) { Move-Item -Path $file.FullName -Destination $out }
+          $exe = Get-ChildItem -Path $out -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'no .exe produced by fyne package' }
+          Copy-Item $exe.FullName -Destination (Join-Path $stage 'argus-asm.exe')
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md -Destination $stage
+          Copy-Item -Recurse -Path (Join-Path $env:RUNNER_TEMP 'licenses') -Destination $stage
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "dist/argus-asm-$env:VERSION-windows-$arch.zip"
+          Get-ChildItem dist
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.fyne_os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  draft:
+    name: create draft GitHub Release v${{ inputs.version }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Write SHA-256 checksums
+        working-directory: release
+        run: |
+          set -euo pipefail
+          ls -la
+          test "$(find . -maxdepth 1 -type f -name 'argus-asm-*' | wc -l)" -eq 3
+          sha256sum argus-asm-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Write the draft release notes
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Draft for Argus ASM v${VERSION}. Review before publishing.
+
+          ## Files
+          - argus-asm-${VERSION}-linux-<arch>.tar.xz: desktop GUI for Linux (Fyne package with desktop entry and icon)
+          - argus-asm-${VERSION}-darwin-<arch>.zip: "Argus ASM.app" for macOS
+          - argus-asm-${VERSION}-windows-<arch>.zip: argus-asm.exe for Windows
+          - Each archive contains licenses/: the license and notice texts of the third-party modules linked into that platform's GUI build.
+          - SHA256SUMS: SHA-256 of each file. Check with \`sha256sum -c SHA256SUMS\` (Linux, macOS) or \`Get-FileHash\` (Windows).
+
+          ## Unsigned binaries
+          These builds are not code-signed or notarized. Windows SmartScreen may warn "Windows protected your PC". macOS Gatekeeper may refuse to open the app because it is from an unidentified developer. See docs/RELEASING.md for the steps and the checks to do first.
+
+          ## Verification status
+          These files were produced by the release workflow on GitHub-hosted runners. Whether each platform's GUI actually starts on a real desktop is listed in docs/TESTING.md, not here.
+          NOTES
+
+      - name: Create the draft release
+        working-directory: release
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "Argus ASM v${VERSION}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            argus-asm-* SHA256SUMS

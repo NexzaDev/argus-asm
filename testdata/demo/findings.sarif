@@ -1,0 +1,23 @@
+{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {"driver": {"name": "demo-sarif-analyzer", "version": "0.0.0-demo"}},
+      "results": [
+        {
+          "ruleId": "DEMO-HSTS-MISSING",
+          "level": "warning",
+          "message": {"text": "Synthetic demo result: HSTS header not set."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "https://api.example.test/"}}}],
+          "properties": {"security-severity": "5.3"}
+        },
+        {
+          "ruleId": "DEMO-DEFAULT-PAGE",
+          "level": "note",
+          "message": {"text": "Synthetic demo result: default web server page."},
+          "locations": [{"physicalLocation": {"artifactLocation": {"uri": "192.0.2.10"}}}]
+        }
+      ]
+    }
+  ]
+}

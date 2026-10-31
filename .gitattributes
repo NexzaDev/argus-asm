@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.go text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.sql text eol=lf
+*.csv text eol=lf
+*.xml text eol=lf
+*.json text eol=lf
+*.pem text eol=lf
+Makefile text eol=lf
